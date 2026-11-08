@@ -3,4 +3,5 @@ themes/default/css/.sass-cache/
 node_modules/
 
 /config.php
+.env
 assets/import
