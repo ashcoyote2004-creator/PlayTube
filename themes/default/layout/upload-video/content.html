@@ -717,7 +717,7 @@
 				   $('#upload-form').removeClass('hidden');
 				   $('.upload').addClass('hidden');
 				   $('#upload-video').submit();
-				   data = JSON.parse(result.response);
+				   var finishUpload = function(data) {
 				   percentVal = '0%';
 				   bar.width(percentVal);
 				$('.progress').addClass('hidden');
@@ -780,10 +780,17 @@
 				else {
 					Snackbar.show({showAction: false,pos: 'bottom-center',backgroundColor: '#e22e40',text: '<div>'+ data.error +'</div>'});
 				}
-		   }
-	   }
-	   });
-	   uploader.init();
+                   };
+                   var uploaded = JSON.parse(result.response);
+                   if (window.PT_CloudVideoUpload) {
+                       window.PT_CloudVideoUpload(uploaded, finishUpload);
+                   } else {
+                       finishUpload(uploaded);
+                   }
+           }
+       }
+       });
+       uploader.init();
 	
 		$('#upload-form form').ajaxForm({
 			url: '{{LINK aj/submit-video}}?hash=' + $('.main_session').val(),

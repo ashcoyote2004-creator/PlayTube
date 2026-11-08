@@ -40,7 +40,9 @@ if (!empty($expired_videos)) {
 	}
 }
 
-if($pt->config->ffmpeg_system == 'on'){
+require_once('assets/includes/services/cloud-upload.php');
+$cloudUpload = PT_CloudVideoEnabled();
+if ($pt->config->ffmpeg_system == 'on' && !$cloudUpload) {
 	$content     = 'ffmpeg';
 }
 if (!PT_IsAdmin()) {
@@ -114,3 +116,11 @@ $pt->title       = $lang->upload . ' | ' . $pt->config->title;
 $pt->description = $pt->config->description;
 $pt->keyword     = $pt->config->keyword;
 $pt->content     = PT_LoadPage("upload-video/$content",array('CURRENCY'   => $currency));
+if ($cloudUpload && $content === 'content') {
+    $endpoint = htmlspecialchars($pt->config->site_url . '/video-pipeline.php', ENT_QUOTES, 'UTF-8');
+    $pt->content = '<div class="alert alert-info" id="cloud-video-status" role="status" data-endpoint="' . $endpoint . '">'
+        . '<strong>Vidara storage + Mux processing</strong><br>'
+        . '<span data-cloud-message>Upload normally below. Processing is checked automatically — no webhook or deployment needed.</span> '
+        . '<button type="button" class="btn btn-default btn-sm" hidden>Check processing again</button></div>' . $pt->content;
+    $pt->content .= '<script src="' . htmlspecialchars($pt->config->site_url, ENT_QUOTES, 'UTF-8') . '/assets/js/cloud-video-upload.js"></script>';
+}

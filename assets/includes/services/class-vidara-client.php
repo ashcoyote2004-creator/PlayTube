@@ -52,7 +52,14 @@ class VidaraClient
             throw new RuntimeException('Video file is not readable');
         }
 
-        $filename = $title ?: basename($filePath);
+        $filename = basename($filePath);
+        if ($title) {
+            $extension = pathinfo($filePath, PATHINFO_EXTENSION);
+            $filename = basename($title);
+            if ($extension && strtolower(pathinfo($filename, PATHINFO_EXTENSION)) !== strtolower($extension)) {
+                $filename .= '.' . $extension;
+            }
+        }
         $mimeType = mime_content_type($filePath) ?: 'application/octet-stream';
 
         $response = $this->request('POST', $this->getUploadServer(), array(
@@ -62,6 +69,10 @@ class VidaraClient
             ),
         ));
 
+        // Some upload servers wrap the file result in the API envelope.
+        if (isset($response['result']) && is_array($response['result'])) {
+            $response = isset($response['result'][0]) ? $response['result'][0] : $response['result'];
+        }
         if (empty($response['filecode'])) {
             throw new RuntimeException('Vidara upload did not return a file code');
         }

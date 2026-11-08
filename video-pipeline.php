@@ -29,12 +29,47 @@ if (!IS_LOGGED || !PT_IsAdmin()) {
     pt_pipeline_respond(403, array('ok' => false, 'error' => 'Administrator session required'));
 }
 
+header('Cache-Control: no-store');
 $action = !empty($_POST['action']) ? $_POST['action'] : (!empty($_GET['action']) ? $_GET['action'] : '');
+
+if ($action !== 'status') {
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        pt_pipeline_respond(405, array('ok' => false, 'error' => 'POST required'));
+    }
+    if (empty($_POST['hash']) || !PT_CheckMainSession($_POST['hash'])) {
+        pt_pipeline_respond(400, array('ok' => false, 'error' => 'Invalid session token'));
+    }
+    if ($pt->config->upload_system !== 'on' || $pt->user->suspend_upload) {
+        pt_pipeline_respond(403, array('ok' => false, 'error' => 'Uploads are disabled for this account'));
+    }
+}
 
 try {
     $pipeline = new VideoPipeline($db);
 
     switch ($action) {
+        case 'process':
+            $uploadedId = !empty($_POST['uploaded_id']) ? (int) $_POST['uploaded_id'] : 0;
+            $upload = $db->where('id', $uploadedId)->where('user_id', $pt->user->id)->getOne(T_UPLOADED);
+            $root = realpath(__DIR__ . '/upload/videos');
+            $path = $upload ? realpath($upload->path) : false;
+            if (!$root || !$path || strpos($path, $root . DIRECTORY_SEPARATOR) !== 0 || !is_file($path)) {
+                pt_pipeline_respond(404, array('ok' => false, 'error' => 'Uploaded video was not found'));
+            }
+            $existingId = isset($_SESSION['cloud_video_pipeline'][$uploadedId])
+                ? $_SESSION['cloud_video_pipeline'][$uploadedId] : 0;
+            if ($existingId) {
+                $row = $pipeline->refresh($existingId);
+            } else {
+                $row = $pipeline->createFromUploadedFile($path, array(
+                    'title' => !empty($_POST['title']) ? $_POST['title'] : basename($path),
+                    'filename' => basename($path),
+                    'user_id' => $pt->user->id,
+                ));
+                $_SESSION['cloud_video_pipeline'][$uploadedId] = $row['id'];
+            }
+            pt_pipeline_respond(200, array('ok' => true, 'video' => $pipeline->publicView($row)));
+
         case 'upload':
             if (empty($_FILES['video']['tmp_name']) || !is_uploaded_file($_FILES['video']['tmp_name'])) {
                 throw new RuntimeException('No video file was uploaded');
@@ -80,6 +115,7 @@ try {
                 throw new RuntimeException('A pipeline id is required');
             }
 
+            $pipeline->ensureSchema();
             pt_pipeline_respond(200, array(
                 'ok'    => true,
                 'video' => $pipeline->publicView($pipeline->refresh($id)),

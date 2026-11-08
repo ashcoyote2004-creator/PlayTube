@@ -1,64 +1,56 @@
-# Video pipeline: Vidara.so storage + Mux processing
+# Video pipeline: Vidara storage + Mux processing (no webhooks)
 
-Raw uploads are stored on **Vidara.so** and handed to **Mux** for transcoding
-and adaptive streaming. Both providers are reached only from the server.
+Only three credentials are needed: `VIDARA_API_KEY`, `MUX_TOKEN_ID`, and
+`MUX_SECRET_KEY`. They are read server-side with `getenv()`; in Base44 the
+web service must load `/run/base44/app.env`. No webhook, webhook secret,
+public callback URL, or production deployment is required to process videos.
+An old `MUX_WEBHOOK_SECRET` value can be removed from the secret manager;
+it is no longer read. `mux-webhook.php` returns 410 and never processes events.
 
-## Configuration
+## Upload from PlayTube
 
-| Variable | Used by | Where to get it |
-| --- | --- | --- |
-| `VIDARA_API_KEY` | `VidaraClient` | Vidara → Settings (`https://vidara.so/settings`) |
-| `MUX_TOKEN_ID` | `MuxClient` (HTTP Basic) | Mux dashboard → Settings → Access Tokens |
-| `MUX_SECRET_KEY` | `MuxClient` (HTTP Basic) | same access token as above |
-| `MUX_WEBHOOK_SECRET` | `mux-webhook.php` signature check | Mux dashboard → Settings → Webhooks |
+For administrators with all three credentials, the normal `/upload-video`
+screen uses Vidara + Mux instead of local FFmpeg. Other users and installations
+without these credentials retain their existing upload behavior.
 
-In the sandbox these are injected from `/run/base44/app.env`; locally copy
-`.env.example` and fill it in. Values are read with `getenv()` and are never
-written to the database, the page or a log line.
+1. The existing uploader stages the video, retaining its upload limits and
+   supported file formats.
+2. The browser POSTs `action=process` and the owned `uploaded_id` to
+   `/video-pipeline.php`, with PlayTube's session hash (CSRF protection).
+3. The server stores the raw video on Vidara, then uploads a copy directly to
+   Mux. Vidara watch-page URLs are not suitable for Mux ingestion.
+4. The browser checks `action=status&id=<id>` every five seconds until Mux
+   returns a ready asset and playback ID, then stops. There are no webhook
+   callbacks or periodic background requests for completed videos.
+5. The existing metadata/thumbnail/privacy form is enabled. Publishing checks
+   the stored processing result and saves the Mux HLS playback URL in PlayTube's
+   normal videos table. The existing watch player already supports HLS.
 
-## Files
+Keep the upload page open while processing. A failed status request or a
+15-minute wait exposes **Check processing again**, which polls the same
+entry without creating another upload or encoding job. The page intentionally
+never enables Publish for failed or unfinished cloud processing.
 
-| File | Purpose |
-| --- | --- |
-| `class-vidara-client.php` | Vidara REST client: upload, upload-from-URL, file info, encoding status, thumbnail, delete |
-| `class-mux-client.php` | Mux REST client: direct uploads, assets from URL, asset/upload status, delete, playback + poster URLs, webhook signature verification |
-| `class-video-pipeline.php` | Orchestrates storage → processing, records state in `video_pipeline` |
-| `video-pipeline.php` (repo root) | Admin-only JSON endpoint that drives the pipeline |
-| `mux-webhook.php` (repo root) | Receives `video.asset.*` events and keeps the row in sync |
+## Backend
 
-## Workflow
+- `class-vidara-client.php`: storage upload/info/delete operations.
+- `class-mux-client.php`: upload/asset API and public playback/poster URLs.
+- `class-video-pipeline.php`: durable `video_pipeline` state, refreshed by
+  outbound API reads. Uses the app DB wrapper's explicit array result mode.
+- `cloud-upload.php`: shared feature detection and publishing checks.
+- `video-pipeline.php`: administrator-only JSON operations. Creation requires
+  POST, a valid session token, enabled uploads and an unsuspended account.
+  `process` accepts only an existing video upload owned by the current user,
+  never an arbitrary server file path.
 
-```
-POST /video-pipeline.php?action=upload  (multipart: video)
-  1. validate the upload
-  2. VidaraClient::uploadFile()    -> filecode + watch URL   (permanent copy)
-  3. MuxClient::createDirectUpload() -> one-time upload URL
-  4. MuxClient::uploadFileToUrl()    -> asset created
-  5. resolve the asset id, store the row (status: preparing)
-  6. Mux fires video.asset.ready -> /mux-webhook.php -> playback id stored
-GET /video-pipeline.php?action=status&id=<id>   -> refresh both providers
-```
+`action=upload` (multipart raw file), `action=direct` (Mux-only direct upload),
+and `action=url` (Mux-only public media URL) remain available to authenticated
+administrators with a session token. They do not bypass the publish form.
 
-`action=direct` returns a Mux upload URL so a browser can PUT the file itself
-(no PHP upload limit, no double handling). `action=url` lets Mux ingest an
-already hosted file.
+## Checks
 
-## Why the file goes to Vidara and Mux separately
-
-Vidara's API returns a **watch-page** URL (`https://vidara.so/v/<filecode>`),
-not a direct file URL, and Mux can only ingest a fetchable media file. So the
-raw file is uploaded to Vidara for storage and streamed to Mux through a direct
-upload. If you have a direct file URL for a video (for example a Vidara direct
-link on a plan that provides one), use `action=url` instead and Mux ingests it
-directly.
-
-## Security notes
-
-- Both endpoints require an administrator session (`video-pipeline.php`) and
-  never expose credentials to the browser.
-- `mux-webhook.php` rejects any request whose `Mux-Signature` does not match
-  `HMAC-SHA256("<timestamp>.<raw body>", MUX_WEBHOOK_SECRET)`; without
-  `MUX_WEBHOOK_SECRET` set it rejects everything.
-- Uploads are limited to known video extensions / `video/*` MIME types.
-- `action=url` only accepts `http(s)` URLs and is admin-only, because Mux will
-  fetch the URL server-side.
+Run `php tests/video-pipeline.php` from the source root inside the PHP service.
+It uses in-memory persistence and fake providers, never real storage or
+encoding credits. Live upload/transcoding remains a separate test and may
+incur provider charges. Provider authentication can be checked with read-only
+API requests without creating video assets.

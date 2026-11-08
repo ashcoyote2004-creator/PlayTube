@@ -5,6 +5,16 @@ if (IS_LOGGED == false || $pt->config->upload_system != 'on') {
     echo json_encode($data);
     exit();
 }
+require_once('assets/includes/services/cloud-upload.php');
+try {
+    $cloudVideo = PT_CloudVideoForPublishing($db,
+        isset($_POST['uploaded_id']) ? $_POST['uploaded_id'] : 0,
+        isset($_POST['video-location']) ? $_POST['video-location'] : '', $pt->user->id);
+} catch (Exception $e) {
+    $data = array('status' => 400, 'message' => $e->getMessage());
+    echo json_encode($data);
+    exit();
+}
 $getID3   = new getID3;
 $featured = ($user->is_pro == 1) ? 1 : 0;
 $filesize = 0;
@@ -97,7 +107,9 @@ if (empty($error)) {
             exit();
         }
     }
-    PT_UploadToS3(PT_Secure($_POST['video-location'], 0));
+    if (!$cloudVideo) {
+        PT_UploadToS3(PT_Secure($_POST['video-location'], 0));
+    }
 
     if (!empty($file['filesize'])) {
         $filesize = $file['filesize'];
@@ -297,6 +309,10 @@ if (empty($error)) {
         if ((($pt->config->usr_v_mon == 'on' && $pt->config->user_mon_approve == 'off') || ($pt->config->usr_v_mon == 'on' && $pt->config->user_mon_approve == 'on' && $pt->user->monetization == '1')) && $pt->user->video_mon == '1' && in_array($_POST['monetization'], array('0','1'))) {
             $data_insert['monetization'] = PT_Secure($_POST['monetization']);
         }
+    }
+    if ($cloudVideo) {
+        $data_insert['video_location'] = $cloudVideo['processing']['playback_url'];
+        $data_insert['converted'] = '1';
     }
     $insert      = $db->insert(T_VIDEOS, $data_insert);
 

@@ -694,7 +694,7 @@ $(function () {
                $('#upload-form').removeClass('hidden');
                $('.upload').addClass('hidden');
                $('#upload-video').submit();
-               data = JSON.parse(result.response);
+               var finishUpload = function(data) {
                percentVal = '0%';
    	    	bar.width(percentVal);
             $('.progress').addClass('hidden');
@@ -757,6 +757,13 @@ $(function () {
             else {
 				Snackbar.show({showAction: false,backgroundColor: '#e22e40',text: '<div>'+ data.error +'</div>'});
             }
+               };
+               var uploaded = JSON.parse(result.response);
+               if (window.PT_CloudVideoUpload) {
+                   window.PT_CloudVideoUpload(uploaded, finishUpload);
+               } else {
+                   finishUpload(uploaded);
+               }
        }
    }
    });

@@ -4,7 +4,7 @@
  *
  * API reference: https://docs.mux.com/api-reference/video
  * Credentials (HTTP Basic) are read from MUX_TOKEN_ID and MUX_SECRET_KEY.
- * Webhook signatures are verified with MUX_WEBHOOK_SECRET.
+ * Processing status is read from the API; no webhook secret is needed.
  */
 class MuxClient
 {
@@ -123,40 +123,6 @@ class MuxClient
     public function deleteAsset($assetId)
     {
         return $this->request('DELETE', '/assets/' . rawurlencode($assetId));
-    }
-
-    /**
-     * Verify the `Mux-Signature` header of an incoming webhook.
-     * Header format: `t=<unix time>,v1=<HMAC-SHA256 of "t.body">`.
-     */
-    public static function verifyWebhookSignature($rawBody, $signatureHeader, $secret)
-    {
-        if (empty($secret) || empty($signatureHeader)) {
-            return false;
-        }
-
-        $timestamp = null;
-        $signature = null;
-
-        foreach (explode(',', $signatureHeader) as $part) {
-            $pair = explode('=', trim($part), 2);
-            if (count($pair) !== 2) {
-                continue;
-            }
-            if ($pair[0] === 't') {
-                $timestamp = $pair[1];
-            } elseif ($pair[0] === 'v1') {
-                $signature = $pair[1];
-            }
-        }
-
-        if ($timestamp === null || $signature === null) {
-            return false;
-        }
-
-        $expected = hash_hmac('sha256', $timestamp . '.' . $rawBody, $secret);
-
-        return hash_equals($expected, $signature);
     }
 
     public static function playbackUrl($playbackId)

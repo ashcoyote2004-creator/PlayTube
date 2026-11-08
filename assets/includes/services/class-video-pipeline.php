@@ -6,8 +6,8 @@
  *            \--direct upload--> Mux (transcoding, adaptive streaming)
  *
  * Every step is recorded in the `video_pipeline` table so the workflow can be
- * resumed/polled after the request has finished, and so a Mux webhook can find
- * the row that belongs to an asset.
+ * polled after the request has finished. No webhook or deployed callback URL
+ * is required.
  */
 class VideoPipeline
 {
@@ -168,42 +168,39 @@ class VideoPipeline
             throw new RuntimeException('Pipeline entry was not found');
         }
 
-        $updates = array();
+        if ($row['mux_status'] === 'ready' && !empty($row['mux_playback_id'])) {
+            return $row; // Finished videos need no further provider requests.
+        }
 
-        if (!empty($row['vidara_filecode'])) {
-            try {
-                $info  = $this->vidara()->getFileInfo($row['vidara_filecode']);
-                $codes = array();
-                if (!empty($info['status'])) {
-                    $codes['vidara_status'] = $info['status'];
-                }
-                $updates = array_merge($updates, $codes);
-            } catch (Exception $e) {
-                $updates['vidara_status'] = 'error';
+        $updates = array('error' => '');
+
+        if (!empty($row['vidara_filecode']) && $row['vidara_status'] !== 'active') {
+            $info = $this->vidara()->getFileInfo($row['vidara_filecode']);
+            if (!empty($info['status'])) {
+                $updates['vidara_status'] = $info['status'];
             }
         }
 
         if (empty($row['mux_asset_id']) && !empty($row['mux_upload_id'])) {
-            try {
-                $upload = $this->mux()->getUpload($row['mux_upload_id']);
-                if (!empty($upload['asset_id'])) {
-                    $row['mux_asset_id'] = $upload['asset_id'];
-                    $updates['mux_asset_id'] = $upload['asset_id'];
-                }
-            } catch (Exception $e) {
-                // Leave the upload id in place and retry on the next refresh.
+            $upload = $this->mux()->getUpload($row['mux_upload_id']);
+            if (!empty($upload['asset_id'])) {
+                $row['mux_asset_id'] = $upload['asset_id'];
+                $updates['mux_asset_id'] = $upload['asset_id'];
+            }
+            if (in_array($upload['status'], array('cancelled', 'timed_out', 'errored'), true)) {
+                $updates['mux_status'] = 'error';
+                $updates['error'] = 'Mux upload ' . $upload['status'];
             }
         }
 
         if (!empty($row['mux_asset_id'])) {
-            try {
-                $asset = $this->mux()->getAsset($row['mux_asset_id']);
-                $updates['mux_status'] = $asset['status'];
-                if (!empty($asset['playback_id'])) {
-                    $updates['mux_playback_id'] = $asset['playback_id'];
-                }
-            } catch (Exception $e) {
-                $updates['mux_status'] = 'error';
+            $asset = $this->mux()->getAsset($row['mux_asset_id']);
+            $updates['mux_status'] = $asset['status'];
+            if (!empty($asset['playback_id'])) {
+                $updates['mux_playback_id'] = $asset['playback_id'];
+            }
+            if ($asset['status'] === 'errored') {
+                $updates['error'] = 'Mux: asset processing failed';
             }
         }
 
@@ -214,52 +211,10 @@ class VideoPipeline
         return $this->find($id);
     }
 
-    /**
-     * Apply a verified Mux webhook event (`video.asset.ready` and friends).
-     */
-    public function applyMuxWebhookEvent(array $event)
-    {
-        $type = isset($event['type']) ? $event['type'] : '';
-        $data = isset($event['data']) ? $event['data'] : array();
-
-        if ($type === 'video.upload.asset_created' && !empty($data['asset_id'])) {
-            $this->db->where('mux_upload_id', $data['id'])->update(self::TABLE, array(
-                'mux_asset_id' => $data['asset_id'],
-                'updated_at'   => time(),
-            ));
-            return $type;
-        }
-
-        if (strpos($type, 'video.asset.') !== 0 || empty($data['id'])) {
-            return 'ignored';
-        }
-
-        $row = $this->db->where('mux_asset_id', $data['id'])->getOne(self::TABLE);
-        if (empty($row)) {
-            return 'ignored';
-        }
-
-        $updates = array(
-            'mux_status' => isset($data['status']) ? $data['status'] : '',
-            'updated_at' => time(),
-        );
-
-        if (!empty($data['playback_ids'][0]['id'])) {
-            $updates['mux_playback_id'] = $data['playback_ids'][0]['id'];
-        }
-
-        if ($type === 'video.asset.errored') {
-            $updates['error'] = 'Mux: asset processing failed';
-        }
-
-        $this->db->where('id', $row['id'])->update(self::TABLE, $updates);
-
-        return $type;
-    }
-
     public function find($id)
     {
-        return $this->db->where('id', (int) $id)->getOne(self::TABLE);
+        // PlayTube's DB wrapper defaults to objects and resets after each query.
+        return $this->db->arrayBuilder()->where('id', (int) $id)->getOne(self::TABLE);
     }
 
     /**
@@ -301,14 +256,21 @@ class VideoPipeline
 
         $now = time();
 
-        return $this->db->insert(self::TABLE, array(
+        $id = $this->db->insert(self::TABLE, array(
             'user_id'          => isset($meta['user_id']) ? (int) $meta['user_id'] : 0,
             'title'            => mb_substr((string) $title, 0, 255),
             'storage_provider' => 'vidara',
             'mux_status'       => 'pending',
+            'error'            => '',
             'created_at'       => $now,
             'updated_at'       => $now,
         ));
+
+        if (!$id) {
+            throw new RuntimeException('Unable to save the video processing entry');
+        }
+
+        return $id;
     }
 
     protected function updateRow($id, array $data)
@@ -326,28 +288,14 @@ class VideoPipeline
     }
 
     /**
-     * Give Mux a moment to attach the asset to the finished upload.
+     * Check once now; subsequent browser polls resolve asynchronous processing.
      */
     protected function resolveMuxAsset($id)
     {
-        $row = $this->find($id);
-
-        for ($attempt = 0; $attempt < 5; $attempt++) {
-            try {
-                $upload = $this->mux()->getUpload($row['mux_upload_id']);
-            } catch (Exception $e) {
-                return;
-            }
-
-            if (!empty($upload['asset_id'])) {
-                $this->updateRow($id, array(
-                    'mux_asset_id' => $upload['asset_id'],
-                    'mux_status'   => 'preparing',
-                ));
-                return;
-            }
-
-            sleep(2);
+        try {
+            $this->refresh($id);
+        } catch (Exception $e) {
+            // A transient status request must not repeat a completed upload.
         }
     }
 
